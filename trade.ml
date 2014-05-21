@@ -113,9 +113,19 @@ module Godxilla : Platform = struct
     {p with stocks = Map.add p.stocks ~key:stock ~data:price}
 
   (* Deal match *)
-  let find_buys p ~filter = 
-    Map.to_alist p.orders |> List.filter ~f:filter |> List.map ~f:snd |> List.sort ~cmp:(fun o1 o2 -> -(compare o1.timestamp o2.timestamp))
-    
+  let find_orders p ~filter ~cmp =
+    Map.to_alist p.orders 
+      |> List.filter ~f:filter 
+      |> List.map ~f:snd 
+      |> List.sort ~cmp
+
+  let find_buys p sell = 
+    find_orders p ~filter:(fun (_, buy) -> buy.stock = sell.stock && buy.price >= sell.price && buy.status = Pending) ~cmp:(fun o1 o2 -> compare (-.o1.price, o1.timestamp) (-.o2.price, o2.timestamp))
+	  
+  let find_sells p buy = 
+    find_orders p ~filter:(fun (_, sell) -> sell.stock = buy.stock && sell.price <=  buy.price && sell.status = Pending) ~cmp:(fun o1 o2 -> compare (o1.price, o1.timestamp) (o2.price, o2.timestamp))
+      
+
   let update_account p ~acc_id ~stock ~vol =
     let p, acc = find_account p acc_id in
     let new_vol = 
@@ -131,36 +141,88 @@ module Godxilla : Platform = struct
   let try_sell p ~sell =
     if sell.order_type = Buy then assert false
     else 
-      let buys = find_buys p ~filter:(fun (_, buy) -> buy.stock = sell.stock && buy.price >= sell.price) in
+      let buys = find_buys p sell in
       let rec loop p sell = function
 	| [] -> p
-	| buy::buys ->
+	| buy::buys -> (
 	  let pos = (buy.price +. sell.price) /. 2. in
-	  let leftover_vol = Float.abs (buy.vol -. sell.vol) in
-	  if buy.vol > sell.vol then
-	    complete_order p ~order_id:sell.id |> update_account ~acc_id:buy.id ~stock:buy.stock ~vol:(-.sell.vol) |> update_account ~acc_id:sell.id ~stock:sell.stock ~vol:sell.vol |> update_order ~order_id:buy.id ~update:(fun buy_order -> {buy_order with vol = leftover_vol}) |> update_stock_pos ~stock:sell.stock ~price:pos
+	  let leftover_vol = Float.abs (buy.vol -. sell.vol) in 
+	  if buy.vol > sell.vol then 
+	    complete_order p ~order_id:sell.id 
+			   |> update_account ~acc_id:buy.id ~stock:buy.stock ~vol:(sell.vol) 
+			   |> update_account ~acc_id:sell.id ~stock:sell.stock ~vol:(-.sell.vol) 
+			   |> update_order ~order_id:buy.id ~update:(fun buy_order -> {buy_order with vol = leftover_vol}) 
+			   |> update_stock_pos ~stock:sell.stock ~price:pos
 	  else if buy.vol = sell.vol then
-	    complete_order p ~order_id:sell.id |> complete_order ~order_id:buy.id |> update_account ~acc_id:buy.id ~stock:buy.stock ~vol:(-.sell.vol) |> update_account ~acc_id:sell.id ~stock:sell.stock ~vol:sell.vol |> update_stock_pos ~stock:sell.stock ~price:pos
+	    complete_order p ~order_id:sell.id 
+			   |> complete_order ~order_id:buy.id 
+			   |> update_account ~acc_id:buy.id ~stock:buy.stock ~vol:(sell.vol) 
+			   |> update_account ~acc_id:sell.id ~stock:sell.stock ~vol:(-.sell.vol)
+			   |> update_stock_pos ~stock:sell.stock ~price:pos
 	  else 
-	    let p = 
-	      complete_order p ~order_id:buy.id |> update_account ~acc_id:buy.id ~stock:buy.stock ~vol:(-.buy.vol) |> update_account ~acc_id:sell.id ~stock:sell.stock ~vol:buy.vol |> update_order ~order_id:sell.id ~update:(fun sell_order -> {sell_order with vol = leftover_vol}) |> update_stock_pos ~stock:sell.stock ~price:pos
+	    let p = complete_order p ~order_id:buy.id 
+			   |> update_account ~acc_id:buy.id ~stock:buy.stock ~vol:(buy.vol) 
+			   |> update_account ~acc_id:sell.id ~stock:sell.stock ~vol:(-.buy.vol)
+			   |> update_order ~order_id:sell.id ~update:(fun sell_order -> {sell_order with vol = leftover_vol}) 
+			   |> update_stock_pos ~stock:sell.stock ~price:pos
 	    in 
-	    loop p {sell with vol = leftover_vol} buys
+	    loop p {sell with vol = leftover_vol} buys 
+	)
       in 
       loop p sell buys
  
+  let try_buy p ~buy =
+    if buy.order_type = Sell then assert false
+    else 
+      let sells = find_sells p buy in
+      let rec loop p buy = function
+	| [] -> p
+	| sell::sells -> (
+	  let pos = (buy.price +. sell.price) /. 2. in
+	  let leftover_vol = Float.abs (buy.vol -. sell.vol) in 
+	  if buy.vol < sell.vol then 
+	    complete_order p ~order_id:buy.id 
+			   |> update_account ~acc_id:buy.id ~stock:buy.stock ~vol:buy.vol
+			   |> update_account ~acc_id:sell.id ~stock:sell.stock ~vol:(-.buy.vol)
+			   |> update_order ~order_id:sell.id ~update:(fun sell_order -> {sell_order with vol = leftover_vol}) 
+			   |> update_stock_pos ~stock:sell.stock ~price:pos
+	  else if buy.vol = sell.vol then
+	    complete_order p ~order_id:buy.id 
+			   |> complete_order ~order_id:sell.id 
+			   |> update_account ~acc_id:buy.id ~stock:buy.stock ~vol:buy.vol
+			   |> update_account ~acc_id:sell.id ~stock:sell.stock ~vol:(-.sell.vol) 
+			   |> update_stock_pos ~stock:sell.stock ~price:pos
+	  else 
+	    let p = complete_order p ~order_id:sell.id 
+			   |> update_account ~acc_id:buy.id ~stock:buy.stock ~vol:(sell.vol) 
+			   |> update_account ~acc_id:sell.id ~stock:sell.stock ~vol:(-.sell.vol)
+			   |> update_order ~order_id:buy.id ~update:(fun buy_order -> {buy_order with vol = leftover_vol}) 
+			   |> update_stock_pos ~stock:sell.stock ~price:pos
+	    in 
+	    loop p {buy with vol = leftover_vol} sells
+	)
+      in 
+      loop p buy sells
       
   (* New order *)
   let new_order p ~acc_id ~stock ~order_type ~price ~vol = 
     let order = create_order ~acc_id ~stock ~order_type ~price ~vol in
-    Some order.id, {p with orders = Map.add p.orders ~key:order.id ~data:order}
-
-
-
+    let p = {p with orders = Map.add p.orders ~key:order.id ~data:order} in
+    match order_type with
+      | Buy -> Some order.id, try_buy p ~buy:order
+      | Sell -> Some order.id, try_sell p ~sell:order
+    
   (* Amend order *)
   let amend_order p ~order_id ~price ~vol = 
-     Some order_id, update_order p ~order_id ~update:(fun order -> {order with price = price; vol = vol;})
-
+    let p = update_order p ~order_id ~update:(fun order -> {order with price = price; vol = vol;}) in
+    match find_pending_order p order_id with
+      | None -> assert false
+      | Some order -> Some order_id, (
+	match order.order_type with
+	  | Buy -> try_buy p ~buy:order
+	  | Sell -> try_sell p ~sell:order
+      )
+     
   (* Cancel order *)
   let cancel_order p ~order_id = None, update_order p ~order_id ~update:(fun order -> {order with status = Cancelled;})
 
